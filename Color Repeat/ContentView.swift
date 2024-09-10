@@ -7,8 +7,7 @@
 
 import SwiftUI
 import CoreMotion
-import SwiftData
-import UIKit
+import FirebaseFirestore // Import Firestore
 
 struct ContentView: View {
     @State private var currentSequence: [Color] = []
@@ -19,34 +18,34 @@ struct ContentView: View {
     @State private var timeRemaining: Int = 60
     @State private var bonusTimeRemaining: Int = 5
     @State private var isBonusRound = false
+    @State private var bonusPointsEarned = false
+    @State private var feedbackText: String? = nil
+    @State private var shakeDetected = false
+    @State private var bonusPointsAwarded = false
+    @State private var showFinalScore = false // To trigger final score screen
     @State private var showPastScores = false
-    @State private var gameStartTime: Date?
-    @State private var userHasInputSequence = false
-    @State private var showStartScreen = true
-    @State private var feedbackText: String? = nil // To show "Correct" or "Incorrect"
-    @State private var allowUserInput = false // Ensures the user must input the sequence
-    @State private var shakeDetected = false // To detect shake in the bonus round
-
+    @State private var gameStarted = false // Start page flag
+    @State private var pastScores: [(score: Int, date: Date)] = [] // Store fetched scores
     let colors: [Color] = [.red, .orange, .yellow, .green, .blue, .purple]
-    let colorNames = ["Red", "Orange", "Yellow", "Green", "Blue", "Purple"]
-    
-    let motionManager = CMMotionManager()
 
-    @Environment(\.modelContext) private var context
-    @Query private var items: [Item] // Query for the Item model
+    // Firestore reference
+    let db = Firestore.firestore()
+
+    let motionManager = CMMotionManager()
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea() // Black background for the game
+            Color.black.ignoresSafeArea() // Black background
 
-            if showStartScreen {
+            if !gameStarted {
+                // Start Page
                 VStack {
-                    Text("Welcome to Color Repeat")
+                    Text("Welcome to Color Repeat!")
                         .font(.largeTitle)
                         .foregroundColor(.white)
                         .padding()
 
-                    Text("Remember the sequence and repeat it by tapping the colors!")
+                    Text("Memorize the color sequence and repeat it! You have 60 seconds to score as many points as you can. A bonus round will let you shake the device for extra points.")
                         .font(.headline)
                         .foregroundColor(.white)
                         .padding()
@@ -60,6 +59,51 @@ struct ContentView: View {
                     .foregroundColor(.black)
                     .cornerRadius(10)
                 }
+            } else if showFinalScore {
+                VStack {
+                    Text("Game Over")
+                        .font(.largeTitle)
+                        .foregroundColor(.white)
+                        .padding()
+
+                    Text("Your total score: \(score)")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .padding()
+
+                    Button("Play Again") {
+                        // Start a completely new game, resetting all states
+                        resetGame()
+                        startNewGame()
+                    }
+                    .font(.title)
+                    .padding()
+                    .background(Color.white)
+                    .foregroundColor(.black)
+                    .cornerRadius(10)
+
+                    Button("View Past Scores") {
+                        loadPastScores()
+                        showPastScores.toggle()
+                    }
+                    .font(.title)
+                    .padding()
+                    .background(Color.white)
+                    .foregroundColor(.black)
+                    .cornerRadius(10)
+
+                    if showPastScores {
+                        List(pastScores, id: \.date) { scoreEntry in
+                            VStack(alignment: .leading) {
+                                Text("Score: \(scoreEntry.score)")
+                                    .font(.headline)
+                                Text("Date: \(formatDate(scoreEntry.date))")
+                                    .font(.subheadline)
+                            }
+                        }
+                        .frame(height: 200)
+                    }
+                }
             } else if gameActive {
                 VStack {
                     if isBonusRound {
@@ -72,6 +116,13 @@ struct ContentView: View {
                             .font(.headline)
                             .foregroundColor(.white)
                             .padding()
+
+                        if bonusPointsEarned {
+                            Text("Bonus points earned!")
+                                .font(.headline)
+                                .foregroundColor(.green)
+                                .padding()
+                        }
                     } else {
                         Text("Time remaining: \(timeRemaining)")
                             .font(.headline)
@@ -102,10 +153,9 @@ struct ContentView: View {
 
                             Button("Hide Sequence") {
                                 showingSequence = false
-                                allowUserInput = true // Allow user input after hiding the sequence
                             }
                             .padding()
-                        } else if allowUserInput {
+                        } else {
                             Text("Repeat the sequence by tapping the colors!")
                                 .font(.headline)
                                 .foregroundColor(.white)
@@ -113,14 +163,13 @@ struct ContentView: View {
 
                             // GeometryReader to adjust button size based on screen size
                             GeometryReader { geometry in
-                                let buttonSize = geometry.size.width / 4 // Adjust button size based on screen width
+                                let buttonSize = geometry.size.width / 4
 
                                 VStack {
-                                    // First row (3 buttons)
                                     HStack {
                                         ForEach(0..<3) { index in
                                             Button(action: {
-                                                self.userTapped(color: colors[index])
+                                                userTapped(color: colors[index])
                                             }) {
                                                 Circle()
                                                     .fill(colors[index])
@@ -129,12 +178,10 @@ struct ContentView: View {
                                             }
                                         }
                                     }
-
-                                    // Second row (3 buttons)
                                     HStack {
                                         ForEach(3..<colors.count) { index in
                                             Button(action: {
-                                                self.userTapped(color: colors[index])
+                                                userTapped(color: colors[index])
                                             }) {
                                                 Circle()
                                                     .fill(colors[index])
@@ -144,160 +191,89 @@ struct ContentView: View {
                                         }
                                     }
                                 }
-                                .frame(maxWidth: .infinity, alignment: .center) // Center the buttons
+                                .frame(maxWidth: .infinity, alignment: .center)
                             }
-                            .frame(maxHeight: .infinity, alignment: .center) // Center the buttons vertically
-
-                            if userHasInputSequence {
-                                Button("Done") {
-                                    checkUserSequence()
-                                }
-                                .padding()
-                                .background(Color.white)
-                                .foregroundColor(.black)
-                                .cornerRadius(10)
-                            }
+                            .frame(maxHeight: .infinity, alignment: .center)
                         }
-                    }
-                }
-            } else {
-                VStack {
-                    Text("Game Over")
-                        .font(.largeTitle)
-                        .foregroundColor(.white)
-                        .padding()
-
-                    Text("Your total score: \(score)")
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .padding()
-
-                    Button("Play Again") {
-                        startNewGame()
-                    }
-                    .font(.title)
-                    .padding()
-                    .background(Color.white)
-                    .foregroundColor(.black)
-                    .cornerRadius(10)
-
-                    Button("View Past Scores") {
-                        showPastScores.toggle()
-                    }
-                    .font(.title)
-                    .padding()
-                    .background(Color.white)
-                    .foregroundColor(.black)
-                    .cornerRadius(10)
-                }
-
-                if showPastScores {
-                    VStack {
-                        Text("Past Scores")
-                            .font(.title2)
-                            .foregroundColor(.white)
-                            .padding()
-
-                        List {
-                            ForEach(items) { item in
-                                HStack {
-                                    Text("\(item.points) points")
-                                    Spacer()
-                                    Text("\(item.date.formatted())")
-                                }
-                            }
-                        }
-                        .frame(height: 300)
-                        
-                        Button("Back to Game") {
-                            showPastScores = false
-                        }
-                        .padding()
-                        .background(Color.white)
-                        .foregroundColor(.black)
-                        .cornerRadius(10)
                     }
                 }
             }
         }
-        .onAppear(perform: setupNewGame)
+        .onAppear(perform: {
+            resetGame() // Ensure the game starts cleanly
+        })
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
-            guard gameActive else { return }
-            if !isBonusRound {
+            if gameActive && !isBonusRound {
                 if timeRemaining > 0 {
                     timeRemaining -= 1
                 } else {
                     startBonusRound()
                 }
-            } else {
+            } else if isBonusRound {
                 if bonusTimeRemaining > 0 {
                     bonusTimeRemaining -= 1
-                    if shakeDetected {
-                        score += 3 // Add bonus points for shake
-                        shakeDetected = false // Reset shake detection
-                        vibratePhone() // Trigger stronger vibration when points are added
+                    if shakeDetected && !bonusPointsAwarded {
+                        score += 3
+                        bonusPointsEarned = true
+                        bonusPointsAwarded = true
+                        vibratePhone()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                            bonusPointsEarned = false
+                        }
                     }
                 } else {
-                    endGame()
+                    endGame()  // End the game after the bonus round
                 }
             }
         }
     }
 
-    func startNewGame() {
+    func resetGame() {
+        // Reset all the states for a new game
         score = 0
         timeRemaining = 60
         bonusTimeRemaining = 5
-        gameStartTime = Date()
-        showingSequence = true
-        gameActive = true
+        gameActive = false
         isBonusRound = false
-        userHasInputSequence = false
-        feedbackText = nil // Clear feedback when starting a new game
-        showStartScreen = false
-        setupNewGame()
-        startShakeDetection() // Start detecting shakes
+        bonusPointsAwarded = false
+        feedbackText = nil
+        showFinalScore = false
+        gameStarted = false
     }
 
-    func setupNewGame() {
+    func startNewGame() {
+        gameStarted = true
+        gameActive = true
         currentSequence = generateRandomSequence()
-        userSequence = []
-        userHasInputSequence = false
-        showingSequence = true // Display the new sequence immediately
-        allowUserInput = false // Disable user input until sequence is hidden
     }
 
     func generateRandomSequence() -> [Color] {
         var sequence: [Color] = []
-        for _ in 0..<4 {  // You can adjust the length of the sequence as needed
+        for _ in 0..<4 {
             sequence.append(colors.randomElement()!)
         }
         return sequence
     }
 
     func userTapped(color: Color) {
-        guard !showingSequence && allowUserInput && gameActive else { return }
-
         userSequence.append(color)
-
         if userSequence.count == currentSequence.count {
-            userHasInputSequence = true  // Show the "Done" button after the sequence is input
+            checkUserSequence()
         }
     }
 
     func checkUserSequence() {
-        allowUserInput = false // Prevent further input until the next sequence
         if userSequence == currentSequence {
-            score += 1  // Increment the score if the sequence is correct
+            score += 1
             feedbackText = "Correct!"
         } else {
             feedbackText = "Incorrect!"
         }
-        
-        // Show feedback for 2 seconds, then move to the next sequence
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             feedbackText = nil
-            setupNewGame()  // Display a new sequence after feedback
+            currentSequence = generateRandomSequence()
+            userSequence = []
+            showingSequence = true
         }
     }
 
@@ -308,21 +284,50 @@ struct ContentView: View {
 
     func endGame() {
         gameActive = false
-        stopShakeDetection()
-        saveScore()
-    }
-
-    func saveScore() {
-        let newItem = Item(points: score) // Save the total score after the game ends
-        context.insert(newItem)
-        do {
-            try context.save()
-        } catch {
-            print("Failed to save item: \(error)")
+        if !bonusPointsAwarded {
+            saveScoreToFirebase()  // Save score only once
+            showFinalScore = true  // Trigger final score screen
         }
     }
 
-    // Start detecting shakes using the accelerometer
+    func saveScoreToFirebase() {
+        let scoreData: [String: Any] = [
+            "score": score,
+            "date": Timestamp(date: Date())
+        ]
+
+        db.collection("scores").addDocument(data: scoreData) { error in
+            if let error = error {
+                print("Error saving score to Firestore: \(error.localizedDescription)")
+            } else {
+                print("Score saved successfully!")
+            }
+        }
+    }
+
+    // Fetch past scores from Firestore
+    func loadPastScores() {
+        db.collection("scores").order(by: "date", descending: true).getDocuments { snapshot, error in
+            if let error = error {
+                print("Error loading scores: \(error.localizedDescription)")
+            } else if let snapshot = snapshot {
+                self.pastScores = snapshot.documents.map { document in
+                    let score = document.data()["score"] as? Int ?? 0
+                    let timestamp = document.data()["date"] as? Timestamp
+                    let date = timestamp?.dateValue() ?? Date()
+                    return (score: score, date: date)
+                }
+            }
+        }
+    }
+
+    func formatDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
     func startShakeDetection() {
         if motionManager.isAccelerometerAvailable {
             motionManager.accelerometerUpdateInterval = 0.2
@@ -337,14 +342,8 @@ struct ContentView: View {
         }
     }
 
-    // Stop detecting shakes
-    func stopShakeDetection() {
-        motionManager.stopAccelerometerUpdates()
+    func vibratePhone() {
+        let generator = UINotificationFeedbackGenerator()
+        generator.notificationOccurred(.error)
     }
-    
-    // Trigger stronger haptic feedback (vibration)
-       func vibratePhone() {
-           let generator = UINotificationFeedbackGenerator()
-           generator.notificationOccurred(.error)  // can use `.success`, `.warning`, or `.error` for different strengths
-       }
-   }
+}
